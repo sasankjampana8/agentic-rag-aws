@@ -1,0 +1,10 @@
+langchain
+langgraph
+langchain-core
+langchain-community
+requests
+python-dotenv
+
+
+#ui
+streamlit
