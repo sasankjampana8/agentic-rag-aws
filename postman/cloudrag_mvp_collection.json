@@ -1,0 +1,69 @@
+{
+  "info": {
+    "name": "CloudRAG MVP",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "https://your-api-id.execute-api.ap-south-1.amazonaws.com/dev" },
+    { "key": "document_id", "value": "doc_xxx" },
+    { "key": "process_id", "value": "proc_xxx" }
+  ],
+  "item": [
+    {
+      "name": "1 Generate Upload URL",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{base_url}}/documents/upload-url",
+        "body": {
+          "mode": "raw",
+          "raw": "{\"user_id\":\"user_123\",\"files\":[{\"file_name\":\"sample.pdf\",\"content_type\":\"application/pdf\",\"file_size_bytes\":5242880}]}"
+        }
+      }
+    },
+    {
+      "name": "3 Document Status",
+      "request": { "method": "GET", "url": "{{base_url}}/documents/{{document_id}}" }
+    },
+    {
+      "name": "4 Start Processing",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{base_url}}/documents/{{document_id}}/process",
+        "body": {
+          "mode": "raw",
+          "raw": "{\"user_id\":\"user_123\",\"embedding_model\":\"text-embedding-3-small\",\"chunking_strategy\":\"recursive\",\"chunk_size\":800,\"chunk_overlap\":120}"
+        }
+      }
+    },
+    {
+      "name": "5 Process Status",
+      "request": { "method": "GET", "url": "{{base_url}}/process/{{process_id}}/status" }
+    },
+    {
+      "name": "6 Retrieval Query",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{base_url}}/retrieval/query",
+        "body": {
+          "mode": "raw",
+          "raw": "{\"user_id\":\"user_123\",\"query\":\"What is this document about?\",\"document_ids\":[\"{{document_id}}\"],\"top_k\":5}"
+        }
+      }
+    },
+    {
+      "name": "7 Ask",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{base_url}}/ask",
+        "body": {
+          "mode": "raw",
+          "raw": "{\"user_id\":\"user_123\",\"query\":\"Summarize this document.\",\"document_ids\":[\"{{document_id}}\"],\"top_k\":5,\"llm_model\":\"gpt-4.1-mini\"}"
+        }
+      }
+    }
+  ]
+}
