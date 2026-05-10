@@ -180,7 +180,7 @@ export function ChatApp() {
       });
       form.append("file", file);
 
-      const s3Response = await fetch(document.upload.url, {
+      const s3Response = await fetch(regionalS3PostUrl(document.upload.url, apiBaseUrl), {
         method: "POST",
         body: form,
       });
@@ -604,6 +604,20 @@ function contentTypeForFile(fileName: string) {
     return "application/pdf";
   }
   return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+}
+
+function regionalS3PostUrl(uploadUrl: string, apiBaseUrl: string) {
+  const region = regionFromApiUrl(apiBaseUrl);
+  if (!region) {
+    return uploadUrl;
+  }
+
+  return uploadUrl.replace(".s3.amazonaws.com", `.s3.${region}.amazonaws.com`);
+}
+
+function regionFromApiUrl(apiBaseUrl: string) {
+  const match = apiBaseUrl.match(/execute-api\.([a-z0-9-]+)\.amazonaws\.com/);
+  return match?.[1];
 }
 
 function normalizeStatus(status?: string) {
