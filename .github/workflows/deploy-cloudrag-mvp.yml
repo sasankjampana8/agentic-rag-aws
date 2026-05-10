@@ -1,0 +1,125 @@
+name: Deploy CloudRAG MVP
+
+on:
+  workflow_dispatch:
+    inputs:
+      stack_name:
+        description: CloudFormation stack name
+        required: true
+        default: cloudrag-mvp
+      region:
+        description: AWS region
+        required: true
+        default: ap-south-1
+      project_name:
+        description: Project prefix
+        required: true
+        default: cloudrag
+      environment_name:
+        description: Environment name
+        required: true
+        default: mvp
+      raw_bucket_name:
+        description: Optional raw documents bucket name. Leave empty to auto-generate.
+        required: false
+        default: ""
+      db_ingress_cidr:
+        description: CIDR allowed to RDS. Use 0.0.0.0/0 for Lambda/GitHub MVP testing; your-ip/32 for local-only.
+        required: true
+        default: 0.0.0.0/0
+      db_instance_class:
+        description: RDS instance class
+        required: true
+        default: db.t3.micro
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      STACK_NAME: ${{ inputs.stack_name }}
+      AWS_REGION: ${{ inputs.region }}
+      ARTIFACT_BUCKET: ${{ vars.CFN_ARTIFACT_BUCKET }}
+      ARTIFACT_PREFIX: cloudrag-lambda/${{ github.sha }}
+      DB_NAME: cloudragdb
+      DB_USERNAME: postgres
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Run backend tests
+        run: |
+          python -m pip install -r requirements-lambda.txt pytest
+          python -m pytest
+
+      - name: Package Lambda ZIPs
+        run: scripts/package_lambdas.sh
+
+      - name: Upload Lambda artifacts
+        run: |
+          test -n "${ARTIFACT_BUCKET}" || (echo "Set repository variable CFN_ARTIFACT_BUCKET" && exit 1)
+          aws s3 cp dist/lambda/ "s3://${ARTIFACT_BUCKET}/${ARTIFACT_PREFIX}/" --recursive --exclude "*" --include "*.zip"
+
+      - name: Deploy CloudFormation stack
+        run: |
+          aws cloudformation deploy \
+            --template-file infra/cloudformation/cloudrag-mvp.yaml \
+            --stack-name "${STACK_NAME}" \
+            --region "${AWS_REGION}" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              ProjectName="${{ inputs.project_name }}" \
+              EnvironmentName="${{ inputs.environment_name }}" \
+              RawBucketName="${{ inputs.raw_bucket_name }}" \
+              DbName="${DB_NAME}" \
+              DbUsername="${DB_USERNAME}" \
+              DbPassword="${{ secrets.DB_PASSWORD }}" \
+              DbInstanceClass="${{ inputs.db_instance_class }}" \
+              DbIngressCidr="${{ inputs.db_ingress_cidr }}" \
+              OpenAIApiKey="${{ secrets.OPENAI_API_KEY }}" \
+              LambdaCodeS3Bucket="${ARTIFACT_BUCKET}" \
+              UploadUrlCodeS3Key="${ARTIFACT_PREFIX}/upload_url_handler.zip" \
+              DocumentStatusCodeS3Key="${ARTIFACT_PREFIX}/document_status_handler.zip" \
+              StartProcessCodeS3Key="${ARTIFACT_PREFIX}/start_process_handler.zip" \
+              ProcessStatusCodeS3Key="${ARTIFACT_PREFIX}/process_status_handler.zip" \
+              ProcessingWorkerCodeS3Key="${ARTIFACT_PREFIX}/processing_worker.zip" \
+              RetrievalCodeS3Key="${ARTIFACT_PREFIX}/retrieval_handler.zip" \
+              AskCodeS3Key="${ARTIFACT_PREFIX}/ask_handler.zip"
+
+      - name: Configure pgvector schema
+        env:
+          PG_PORT: "5432"
+          PG_DATABASE: cloudragdb
+          PG_USER: postgres
+          PG_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          PG_HOST="$(aws cloudformation describe-stacks \
+            --stack-name "${STACK_NAME}" \
+            --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='DbEndpoint'].OutputValue" \
+            --output text)"
+          echo "Configuring schema on ${PG_HOST}"
+          PG_HOST="${PG_HOST}" python scripts/setup_pgvector_schema.py
+
+      - name: Show stack outputs
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name "${STACK_NAME}" \
+            --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs" \
+            --output table

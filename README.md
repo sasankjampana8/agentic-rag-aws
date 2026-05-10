@@ -121,6 +121,156 @@ Use region `ap-south-1` and prefix `cloudrag-mvp`.
 - API Gateway HTTP API: `cloudrag-mvp-api`
 - Lambda functions for upload URL, document status, start process, process status, worker, retrieval, and ask
 
+## CloudFormation + GitHub Actions
+
+This repo includes CloudFormation and GitHub Actions for repeatable MVP deployments.
+
+Files:
+
+- `infra/cloudformation/bootstrap-github-oidc.yaml`
+- `infra/cloudformation/cloudrag-mvp.yaml`
+- `.github/workflows/deploy-cloudrag-mvp.yml`
+- `.github/workflows/destroy-cloudrag-mvp.yml`
+- `scripts/package_lambdas.sh`
+
+The main stack creates the stage-1 RAG backbone:
+
+- S3 raw document bucket
+- DynamoDB document metadata table
+- DynamoDB process jobs table
+- SQS processing queue and DLQ
+- RDS PostgreSQL database
+- VPC/subnets/security group for the public MVP database
+- IAM roles for Lambda
+- Lambda functions
+- SQS event source mapping for the worker
+- HTTP API Gateway routes
+
+It also deploys the code paths for:
+
+- Presigned upload URL generation
+- Document metadata/status
+- SQS async processing
+- PDF/DOCX text extraction
+- Chunking
+- OpenAI embeddings
+- pgvector insertion
+- Retrieval
+- LLM answer generation with citations
+
+### MVP Networking Note
+
+For the lowest-cost MVP, Lambdas are not placed inside a VPC. That lets them call OpenAI without a NAT Gateway. To let those public Lambdas and the GitHub runner connect to RDS, the workflow accepts `db_ingress_cidr`.
+
+For quick experiments, use:
+
+```text
+0.0.0.0/0
+```
+
+This is convenient but not production-safe. Delete the stack when done. For production, move RDS private and use Lambda in VPC with NAT Gateway, ECS/Fargate, or another controlled egress design.
+
+### One-Time Bootstrap
+
+Deploy the bootstrap stack once from your local machine or AWS CloudShell. It creates:
+
+- GitHub OIDC deploy role
+- S3 artifact bucket for Lambda ZIP files
+
+Example:
+
+```bash
+aws cloudformation deploy \
+  --template-file infra/cloudformation/bootstrap-github-oidc.yaml \
+  --stack-name cloudrag-github-bootstrap \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --region ap-south-1 \
+  --parameter-overrides \
+    GitHubOrg=sasankjampana8 \
+    GitHubRepo=agentic-rag-aws \
+    ArtifactBucketName=cloudrag-mvp-artifacts-285870986996-ap-south-1 \
+    CreateGitHubOidcProvider=true
+```
+
+If your AWS account already has the GitHub OIDC provider, set:
+
+```text
+CreateGitHubOidcProvider=false
+```
+
+Then get outputs:
+
+```bash
+aws cloudformation describe-stacks \
+  --stack-name cloudrag-github-bootstrap \
+  --region ap-south-1 \
+  --query "Stacks[0].Outputs"
+```
+
+### GitHub Secrets And Variables
+
+Repository secrets:
+
+```text
+AWS_GITHUB_DEPLOY_ROLE_ARN
+OPENAI_API_KEY
+DB_PASSWORD
+```
+
+Repository variables:
+
+```text
+CFN_ARTIFACT_BUCKET
+```
+
+Do not store AWS access keys if using OIDC. The official `aws-actions/configure-aws-credentials` action recommends OIDC so GitHub receives short-lived AWS credentials instead of long-lived keys.
+
+Sources:
+
+- GitHub OIDC for AWS: https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services
+- AWS credentials action: https://github.com/marketplace/actions/configure-aws-credentials-action-for-github-actions
+
+### Deploy
+
+In GitHub:
+
+```text
+Actions -> Deploy CloudRAG MVP -> Run workflow
+```
+
+Recommended inputs for experiments:
+
+```text
+stack_name: cloudrag-mvp
+region: ap-south-1
+project_name: cloudrag
+environment_name: mvp
+raw_bucket_name: leave blank, or provide a globally unique bucket name
+db_ingress_cidr: 0.0.0.0/0
+db_instance_class: db.t3.micro
+```
+
+The workflow:
+
+1. Runs backend tests.
+2. Packages Lambda ZIPs.
+3. Uploads ZIPs to the artifact bucket.
+4. Deploys CloudFormation.
+5. Runs pgvector SQL setup against RDS.
+6. Prints stack outputs.
+
+### Destroy
+
+In GitHub:
+
+```text
+Actions -> Destroy CloudRAG MVP -> Run workflow
+```
+
+This empties the stack-created raw bucket, deletes the stack, and waits for deletion. Use it after experiments to avoid RDS costs.
+
+The artifact bucket from the bootstrap stack is intentionally not deleted by the app stack.
+
 ## IAM Summary
 
 Use one Lambda execution role per function. Every role needs CloudWatch Logs permissions. Keep service permissions narrow:

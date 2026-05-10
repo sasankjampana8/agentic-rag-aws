@@ -1,0 +1,659 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CloudRAG Agent MVP 1 - serverless RAG backbone.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cloudrag
+  EnvironmentName:
+    Type: String
+    Default: mvp
+  RawBucketName:
+    Type: String
+    Default: ""
+    Description: Optional globally unique S3 bucket name. Leave blank to let CloudFormation generate one.
+  DbName:
+    Type: String
+    Default: cloudragdb
+  DbUsername:
+    Type: String
+    Default: postgres
+  DbPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+  DbInstanceClass:
+    Type: String
+    Default: db.t3.micro
+  DbAllocatedStorage:
+    Type: Number
+    Default: 20
+  DbIngressCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to connect to PostgreSQL. Use your-ip/32 for local-only; 0.0.0.0/0 lets public Lambda + GitHub runner connect for MVP experiments.
+  OpenAIApiKey:
+    Type: String
+    NoEcho: true
+  OpenAIEmbeddingModel:
+    Type: String
+    Default: text-embedding-3-small
+  OpenAILlmModel:
+    Type: String
+    Default: gpt-4.1-mini
+  LambdaCodeS3Bucket:
+    Type: String
+  UploadUrlCodeS3Key:
+    Type: String
+  DocumentStatusCodeS3Key:
+    Type: String
+  StartProcessCodeS3Key:
+    Type: String
+  ProcessStatusCodeS3Key:
+    Type: String
+  ProcessingWorkerCodeS3Key:
+    Type: String
+  RetrievalCodeS3Key:
+    Type: String
+  AskCodeS3Key:
+    Type: String
+
+Conditions:
+  HasRawBucketName: !Not [!Equals [!Ref RawBucketName, ""]]
+
+Resources:
+  RawDocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !If [HasRawBucketName, !Ref RawBucketName, !Ref AWS::NoValue]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [GET, HEAD, POST, PUT]
+            AllowedOrigins: ["*"]
+            MaxAge: 3000
+
+  DocumentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: cloudrag_documents
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: document_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: document_id
+          KeyType: HASH
+
+  ProcessJobsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: cloudrag_process_jobs
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: process_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: process_id
+          KeyType: HASH
+
+  ProcessingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: cloudrag-processing-dlq
+      MessageRetentionPeriod: 345600
+
+  ProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: cloudrag-processing-queue
+      VisibilityTimeout: 960
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ProcessingDLQ.Arn
+        maxReceiveCount: 3
+
+  RagVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.42.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref RagVpc
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref RagVpc
+      CidrBlock: 10.42.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-public-a
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref RagVpc
+      CidrBlock: 10.42.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-public-b
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref RagVpc
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetA
+
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetB
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CloudRAG PostgreSQL access
+      GroupName: !Sub ${ProjectName}-${EnvironmentName}-rds-sg
+      VpcId: !Ref RagVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !Ref DbIngressCidr
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: CloudRAG public DB subnet group for MVP experiments
+      SubnetIds:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+
+  PostgresDb:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub ${ProjectName}-${EnvironmentName}-postgres
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: !Ref DbAllocatedStorage
+      Engine: postgres
+      DBName: !Ref DbName
+      MasterUsername: !Ref DbUsername
+      MasterUserPassword: !Ref DbPassword
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DbSecurityGroup
+      PubliclyAccessible: true
+      MultiAZ: false
+      StorageType: gp3
+      StorageEncrypted: true
+      BackupRetentionPeriod: 0
+      DeletionProtection: false
+      AutoMinorVersionUpgrade: true
+
+  UploadUrlRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvironmentName}-upload-url-role
+      AssumeRolePolicyDocument: &LambdaTrust
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: UploadUrlAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt DocumentsTable.Arn
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${RawDocumentsBucket.Arn}/raw/*
+
+  DocumentStatusRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvironmentName}-document-status-role
+      AssumeRolePolicyDocument: *LambdaTrust
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DocumentStatusAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+                Resource: !GetAtt DocumentsTable.Arn
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub ${RawDocumentsBucket.Arn}/raw/*
+
+  StartProcessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvironmentName}-start-process-role
+      AssumeRolePolicyDocument: *LambdaTrust
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: StartProcessAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+                Resource: !GetAtt DocumentsTable.Arn
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt ProcessJobsTable.Arn
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub ${RawDocumentsBucket.Arn}/raw/*
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt ProcessingQueue.Arn
+
+  ProcessStatusRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvironmentName}-process-status-role
+      AssumeRolePolicyDocument: *LambdaTrust
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ProcessStatusAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !GetAtt ProcessJobsTable.Arn
+
+  ProcessingWorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvironmentName}-processing-worker-role
+      AssumeRolePolicyDocument: *LambdaTrust
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ProcessingWorkerAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes, sqs:ChangeMessageVisibility]
+                Resource: !GetAtt ProcessingQueue.Arn
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+                Resource:
+                  - !GetAtt DocumentsTable.Arn
+                  - !GetAtt ProcessJobsTable.Arn
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub ${RawDocumentsBucket.Arn}/raw/*
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${RawDocumentsBucket.Arn}/processed/*
+
+  RetrievalRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvironmentName}-retrieval-role
+      AssumeRolePolicyDocument: *LambdaTrust
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  AskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvironmentName}-ask-role
+      AssumeRolePolicyDocument: *LambdaTrust
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  UploadUrlFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: cloudrag-upload-url-handler
+      Runtime: python3.13
+      Handler: handler.lambda_handler
+      Role: !GetAtt UploadUrlRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref UploadUrlCodeS3Key
+      Environment: &CommonEnvironment
+        Variables:
+          AWS_REGION: !Ref AWS::Region
+          RAW_BUCKET: !Ref RawDocumentsBucket
+          DOCUMENT_TABLE: !Ref DocumentsTable
+          PROCESS_JOB_TABLE: !Ref ProcessJobsTable
+          PROCESS_QUEUE_URL: !Ref ProcessingQueue
+          UPLOAD_EXPIRY_SECONDS: "900"
+          MAX_FILES: "10"
+          MAX_FILE_SIZE_BYTES: "10485760"
+          OPENAI_API_KEY: !Ref OpenAIApiKey
+          OPENAI_EMBEDDING_MODEL: !Ref OpenAIEmbeddingModel
+          OPENAI_LLM_MODEL: !Ref OpenAILlmModel
+          PG_HOST: !GetAtt PostgresDb.Endpoint.Address
+          PG_PORT: !GetAtt PostgresDb.Endpoint.Port
+          PG_DATABASE: !Ref DbName
+          PG_USER: !Ref DbUsername
+          PG_PASSWORD: !Ref DbPassword
+          CHUNK_SIZE: "800"
+          CHUNK_OVERLAP: "120"
+          EMBEDDING_BATCH_SIZE: "50"
+          DEFAULT_TOP_K: "5"
+          DEFAULT_SIMILARITY_THRESHOLD: "0.0"
+
+  DocumentStatusFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: cloudrag-document-status-handler
+      Runtime: python3.13
+      Handler: handler.lambda_handler
+      Role: !GetAtt DocumentStatusRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref DocumentStatusCodeS3Key
+      Environment: *CommonEnvironment
+
+  StartProcessFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: cloudrag-start-process-handler
+      Runtime: python3.13
+      Handler: handler.lambda_handler
+      Role: !GetAtt StartProcessRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref StartProcessCodeS3Key
+      Environment: *CommonEnvironment
+
+  ProcessStatusFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: cloudrag-process-status-handler
+      Runtime: python3.13
+      Handler: handler.lambda_handler
+      Role: !GetAtt ProcessStatusRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref ProcessStatusCodeS3Key
+      Environment: *CommonEnvironment
+
+  ProcessingWorkerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: cloudrag-processing-worker
+      Runtime: python3.13
+      Handler: handler.lambda_handler
+      Role: !GetAtt ProcessingWorkerRole.Arn
+      Timeout: 900
+      MemorySize: 2048
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref ProcessingWorkerCodeS3Key
+      Environment: *CommonEnvironment
+
+  RetrievalFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: cloudrag-retrieval-handler
+      Runtime: python3.13
+      Handler: handler.lambda_handler
+      Role: !GetAtt RetrievalRole.Arn
+      Timeout: 60
+      MemorySize: 1024
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref RetrievalCodeS3Key
+      Environment: *CommonEnvironment
+
+  AskFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: cloudrag-ask-handler
+      Runtime: python3.13
+      Handler: handler.lambda_handler
+      Role: !GetAtt AskRole.Arn
+      Timeout: 120
+      MemorySize: 1024
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref AskCodeS3Key
+      Environment: *CommonEnvironment
+
+  ProcessingWorkerEventSource:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      EventSourceArn: !GetAtt ProcessingQueue.Arn
+      FunctionName: !Ref ProcessingWorkerFunction
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: cloudrag-mvp-api
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowMethods: [GET, POST, OPTIONS]
+        AllowHeaders: ["*"]
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: dev
+      AutoDeploy: true
+
+  UploadUrlIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt UploadUrlFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  DocumentStatusIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt DocumentStatusFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  StartProcessIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt StartProcessFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  ProcessStatusIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ProcessStatusFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  RetrievalIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt RetrievalFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  AskIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt AskFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  UploadUrlRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /documents/upload-url
+      Target: !Sub integrations/${UploadUrlIntegration}
+
+  DocumentStatusRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /documents/{document_id}
+      Target: !Sub integrations/${DocumentStatusIntegration}
+
+  StartProcessRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /documents/{document_id}/process
+      Target: !Sub integrations/${StartProcessIntegration}
+
+  ProcessStatusRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /process/{process_id}/status
+      Target: !Sub integrations/${ProcessStatusIntegration}
+
+  RetrievalRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /retrieval/query
+      Target: !Sub integrations/${RetrievalIntegration}
+
+  AskRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /ask
+      Target: !Sub integrations/${AskIntegration}
+
+  UploadUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref UploadUrlFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/*
+
+  DocumentStatusInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DocumentStatusFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/*
+
+  StartProcessInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartProcessFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/*
+
+  ProcessStatusInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ProcessStatusFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/*
+
+  RetrievalInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RetrievalFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/*
+
+  AskInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AskFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/*
+
+Outputs:
+  ApiBaseUrl:
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/dev
+  RawBucket:
+    Value: !Ref RawDocumentsBucket
+  DocumentsTableName:
+    Value: !Ref DocumentsTable
+  ProcessJobsTableName:
+    Value: !Ref ProcessJobsTable
+  ProcessingQueueUrl:
+    Value: !Ref ProcessingQueue
+  DbEndpoint:
+    Value: !GetAtt PostgresDb.Endpoint.Address
+  DbPort:
+    Value: !GetAtt PostgresDb.Endpoint.Port
+  DbName:
+    Value: !Ref DbName

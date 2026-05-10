@@ -1,0 +1,8 @@
+boto3
+openai
+PyMuPDF
+python-docx
+psycopg[binary]
+python-dotenv
+pydantic
+tenacity
