@@ -408,7 +408,6 @@ Resources:
         S3Key: !Ref UploadUrlCodeS3Key
       Environment:
         Variables:
-          AWS_REGION: !Ref AWS::Region
           RAW_BUCKET: !Ref RawDocumentsBucket
           DOCUMENT_TABLE: !Ref DocumentsTable
           PROCESS_JOB_TABLE: !Ref ProcessJobsTable
@@ -444,7 +443,6 @@ Resources:
         S3Key: !Ref DocumentStatusCodeS3Key
       Environment:
         Variables:
-          AWS_REGION: !Ref AWS::Region
           RAW_BUCKET: !Ref RawDocumentsBucket
           DOCUMENT_TABLE: !Ref DocumentsTable
           PROCESS_JOB_TABLE: !Ref ProcessJobsTable
@@ -480,7 +478,6 @@ Resources:
         S3Key: !Ref StartProcessCodeS3Key
       Environment:
         Variables:
-          AWS_REGION: !Ref AWS::Region
           RAW_BUCKET: !Ref RawDocumentsBucket
           DOCUMENT_TABLE: !Ref DocumentsTable
           PROCESS_JOB_TABLE: !Ref ProcessJobsTable
@@ -516,7 +513,6 @@ Resources:
         S3Key: !Ref ProcessStatusCodeS3Key
       Environment:
         Variables:
-          AWS_REGION: !Ref AWS::Region
           RAW_BUCKET: !Ref RawDocumentsBucket
           DOCUMENT_TABLE: !Ref DocumentsTable
           PROCESS_JOB_TABLE: !Ref ProcessJobsTable
@@ -552,7 +548,6 @@ Resources:
         S3Key: !Ref ProcessingWorkerCodeS3Key
       Environment:
         Variables:
-          AWS_REGION: !Ref AWS::Region
           RAW_BUCKET: !Ref RawDocumentsBucket
           DOCUMENT_TABLE: !Ref DocumentsTable
           PROCESS_JOB_TABLE: !Ref ProcessJobsTable
@@ -588,7 +583,6 @@ Resources:
         S3Key: !Ref RetrievalCodeS3Key
       Environment:
         Variables:
-          AWS_REGION: !Ref AWS::Region
           RAW_BUCKET: !Ref RawDocumentsBucket
           DOCUMENT_TABLE: !Ref DocumentsTable
           PROCESS_JOB_TABLE: !Ref ProcessJobsTable
@@ -624,7 +618,6 @@ Resources:
         S3Key: !Ref AskCodeS3Key
       Environment:
         Variables:
-          AWS_REGION: !Ref AWS::Region
           RAW_BUCKET: !Ref RawDocumentsBucket
           DOCUMENT_TABLE: !Ref DocumentsTable
           PROCESS_JOB_TABLE: !Ref ProcessJobsTable
