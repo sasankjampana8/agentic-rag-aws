@@ -2,6 +2,7 @@
 
 import {
   AlertCircle,
+  BarChart3,
   Bot,
   CheckCircle2,
   ChevronDown,
@@ -10,6 +11,7 @@ import {
   History,
   KeyRound,
   Loader2,
+  LogIn,
   Menu,
   MessageSquarePlus,
   MoreHorizontal,
@@ -23,10 +25,9 @@ import {
   User,
 } from "lucide-react";
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
-import { chatHistory } from "@/lib/mock-data";
 
-type Panel = "documents" | "settings";
-type DocStatus = "PENDING_UPLOAD" | "UPLOADED" | "QUEUED" | "PROCESSING" | "COMPLETED" | "FAILED";
+type Panel = "documents" | "settings" | "trace";
+type DocStatus = "PENDING_UPLOAD" | "UPLOADED" | "QUEUED" | "PROCESSING" | "COMPLETED" | "FAILED" | "NOT_STARTED";
 
 type Citation = {
   chunk_id: string;
@@ -36,11 +37,20 @@ type Citation = {
   score?: number;
 };
 
+type Artifact = {
+  artifact_id: string;
+  artifact_type: string;
+  content_type: string;
+  presigned_url?: string;
+  s3_key?: string;
+};
+
 type ChatMessage = {
   id: string;
   role: "assistant" | "user";
   content: string;
   citations?: Citation[];
+  artifacts?: Artifact[];
 };
 
 type StoredDocument = {
@@ -61,28 +71,61 @@ type ApiDocument = StoredDocument & {
   };
 };
 
+type ChatSummary = {
+  chat_id: string;
+  title: string;
+  status: string;
+  message_count?: number;
+  last_message_preview?: string | null;
+  updated_at?: string;
+};
+
+type AuthTokens = {
+  access_token: string;
+  id_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+};
+
 const DEFAULT_API_BASE_URL = "https://xqyn795842.execute-api.ap-south-1.amazonaws.com/dev";
-const PROCESSING_STATUSES = new Set(["QUEUED", "PROCESSING", "TEXT_EXTRACTION_STARTED", "TEXT_EXTRACTION_COMPLETED", "CHUNKING_STARTED", "CHUNKING_COMPLETED", "EMBEDDING_STARTED", "INDEXING_STARTED"]);
+const PROCESSING_STATUSES = new Set([
+  "QUEUED",
+  "PROCESSING",
+  "TEXT_EXTRACTION_STARTED",
+  "TEXT_EXTRACTION_COMPLETED",
+  "CHUNKING_STARTED",
+  "CHUNKING_COMPLETED",
+  "EMBEDDING_STARTED",
+  "INDEXING_STARTED",
+]);
 
 export function ChatApp() {
   const [panel, setPanel] = useState<Panel>("documents");
   const [input, setInput] = useState("");
   const [apiBaseUrl, setApiBaseUrl] = useState(DEFAULT_API_BASE_URL);
-  const [userId, setUserId] = useState("user_123");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
+  const [confirmationCode, setConfirmationCode] = useState("");
+  const [tokens, setTokens] = useState<AuthTokens | null>(null);
   const [llmModel, setLlmModel] = useState("gpt-4.1-mini");
-  const [embeddingModel, setEmbeddingModel] = useState("text-embedding-3-small");
   const [documents, setDocuments] = useState<StoredDocument[]>([]);
   const [selectedDocumentId, setSelectedDocumentId] = useState<string>("");
+  const [chats, setChats] = useState<ChatSummary[]>([]);
+  const [activeChatId, setActiveChatId] = useState<string>("");
+  const [activeRunId, setActiveRunId] = useState<string>("");
+  const [trace, setTrace] = useState<Record<string, unknown> | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "welcome",
       role: "assistant",
       content:
-        "CloudRAG is connected. Upload a PDF or DOCX, start processing, then ask a grounded question from the indexed document.",
+        "Sign in, upload documents, process them, then ask grounded questions. I will route through RAG, memory, and tools when useful.",
     },
   ]);
   const [uploading, setUploading] = useState(false);
   const [processingId, setProcessingId] = useState<string | null>(null);
+  const [pendingMessageId, setPendingMessageId] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
   const [notice, setNotice] = useState<string>("");
   const [error, setError] = useState<string>("");
@@ -97,8 +140,31 @@ export function ChatApp() {
     [documents],
   );
 
+  const authenticated = Boolean(tokens?.access_token);
+
   useEffect(() => {
-    if (!processingId) {
+    const savedApi = window.localStorage.getItem("cloudrag.apiBaseUrl");
+    const savedTokens = window.localStorage.getItem("cloudrag.tokens");
+    const savedEmail = window.localStorage.getItem("cloudrag.email");
+    if (savedApi) setApiBaseUrl(savedApi);
+    if (savedEmail) setEmail(savedEmail);
+    if (savedTokens) setTokens(JSON.parse(savedTokens));
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem("cloudrag.apiBaseUrl", apiBaseUrl);
+  }, [apiBaseUrl]);
+
+  useEffect(() => {
+    if (!tokens?.access_token) {
+      return;
+    }
+    refreshDocuments();
+    refreshChats();
+  }, [tokens?.access_token]);
+
+  useEffect(() => {
+    if (!processingId || !selectedDocumentId || !tokens?.access_token) {
       return;
     }
 
@@ -111,16 +177,12 @@ export function ChatApp() {
           stage: string;
           total_chunks?: number;
           error_message?: string | null;
-        }>(apiBaseUrl, `/process/${processingId}/status`);
+        }>(apiBaseUrl, `/v1/documents/${selectedDocumentId}/processes/${processingId}`, { token: tokens.access_token });
 
         setDocuments((current) =>
           current.map((doc) =>
             doc.document_id === job.document_id
-              ? {
-                  ...doc,
-                  processing_status: normalizeStatus(job.status),
-                  latest_process_id: job.process_id,
-                }
+              ? { ...doc, processing_status: normalizeStatus(job.status), latest_process_id: job.process_id }
               : doc,
           ),
         );
@@ -128,6 +190,7 @@ export function ChatApp() {
         if (job.status === "COMPLETED") {
           setProcessingId(null);
           setNotice(`Processing completed. ${job.total_chunks ?? "Your"} chunks are ready for chat.`);
+          refreshDocuments();
         }
 
         if (job.status === "FAILED") {
@@ -140,13 +203,129 @@ export function ChatApp() {
     }, 5000);
 
     return () => window.clearInterval(timer);
-  }, [apiBaseUrl, processingId]);
+  }, [apiBaseUrl, processingId, selectedDocumentId, tokens?.access_token]);
+
+  useEffect(() => {
+    if (!pendingMessageId || !activeChatId || !tokens?.access_token) {
+      return;
+    }
+
+    const timer = window.setInterval(async () => {
+      try {
+        const response = await apiFetch<{
+          message_id: string;
+          status: string;
+          answer: string | null;
+          citations: Citation[];
+          artifacts: Artifact[];
+          run_id: string;
+          error_message?: string | null;
+        }>(apiBaseUrl, `/v1/chats/${activeChatId}/messages/${pendingMessageId}/response`, {
+          token: tokens.access_token,
+        });
+
+        setActiveRunId(response.run_id);
+        if (response.status === "COMPLETED" && response.answer) {
+          setPendingMessageId(null);
+          setAsking(false);
+          setMessages((current) => [
+            ...current,
+            {
+              id: `${response.message_id}_assistant`,
+              role: "assistant",
+              content: response.answer || "",
+              citations: response.citations,
+              artifacts: response.artifacts,
+            },
+          ]);
+          setNotice("Answer completed. Trace is available in the Trace panel.");
+          refreshChats();
+          loadTrace(response.run_id);
+        }
+
+        if (response.status === "FAILED") {
+          setPendingMessageId(null);
+          setAsking(false);
+          setError(response.error_message || "Runtime failed. Check the run trace and CloudWatch logs.");
+        }
+      } catch (err) {
+        setError(formatError(err));
+      }
+    }, 3500);
+
+    return () => window.clearInterval(timer);
+  }, [activeChatId, apiBaseUrl, pendingMessageId, tokens?.access_token]);
+
+  async function refreshDocuments() {
+    if (!tokens?.access_token) return;
+    const response = await apiFetch<{ documents: StoredDocument[] }>(apiBaseUrl, "/v1/documents", {
+      token: tokens.access_token,
+    });
+    setDocuments(response.documents || []);
+    if (!selectedDocumentId && response.documents?.[0]) {
+      setSelectedDocumentId(response.documents[0].document_id);
+    }
+  }
+
+  async function refreshChats() {
+    if (!tokens?.access_token) return;
+    const response = await apiFetch<{ chats: ChatSummary[] }>(apiBaseUrl, "/v1/chats", {
+      token: tokens.access_token,
+    });
+    setChats(response.chats || []);
+    if (!activeChatId && response.chats?.[0]) {
+      setActiveChatId(response.chats[0].chat_id);
+    }
+  }
+
+  async function signup() {
+    setError("");
+    const response = await apiFetch<{ status: string }>(apiBaseUrl, "/v1/auth/signup", {
+      method: "POST",
+      body: JSON.stringify({ email, password, name: name || email }),
+    });
+    setNotice(`Signup status: ${response.status}. Check email for confirmation code.`);
+    window.localStorage.setItem("cloudrag.email", email);
+  }
+
+  async function confirmSignup() {
+    setError("");
+    const response = await apiFetch<{ status: string }>(apiBaseUrl, "/v1/auth/confirm", {
+      method: "POST",
+      body: JSON.stringify({ email, confirmation_code: confirmationCode }),
+    });
+    setNotice(`User ${response.status}. You can log in now.`);
+  }
+
+  async function login() {
+    setError("");
+    const response = await apiFetch<AuthTokens>(apiBaseUrl, "/v1/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password }),
+    });
+    setTokens(response);
+    window.localStorage.setItem("cloudrag.tokens", JSON.stringify(response));
+    window.localStorage.setItem("cloudrag.email", email);
+    setNotice("Logged in. Protected /v1 APIs are ready.");
+  }
+
+  function logout() {
+    setTokens(null);
+    setDocuments([]);
+    setChats([]);
+    setActiveChatId("");
+    setActiveRunId("");
+    setTrace(null);
+    window.localStorage.removeItem("cloudrag.tokens");
+    setNotice("Logged out locally.");
+  }
 
   async function handleUpload(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = "";
 
-    if (!file) {
+    if (!file || !tokens?.access_token) {
+      setError("Log in before uploading documents.");
       return;
     }
 
@@ -155,10 +334,10 @@ export function ChatApp() {
     setNotice(`Uploading ${file.name}...`);
 
     try {
-      const uploadUrl = await apiFetch<{ documents: ApiDocument[] }>(apiBaseUrl, "/documents/upload-url", {
+      const uploadUrl = await apiFetch<{ documents: ApiDocument[] }>(apiBaseUrl, "/v1/documents/upload-url", {
         method: "POST",
+        token: tokens.access_token,
         body: JSON.stringify({
-          user_id: userId,
           files: [
             {
               file_name: file.name,
@@ -175,9 +354,7 @@ export function ChatApp() {
       }
 
       const form = new FormData();
-      Object.entries(document.upload.fields).forEach(([key, value]) => {
-        form.append(key, value);
-      });
+      Object.entries(document.upload.fields).forEach(([key, value]) => form.append(key, value));
       form.append("file", file);
 
       const s3Response = await fetch(regionalS3PostUrl(document.upload.url, apiBaseUrl), {
@@ -189,7 +366,9 @@ export function ChatApp() {
         throw new Error(`S3 upload failed with status ${s3Response.status}`);
       }
 
-      const status = await apiFetch<StoredDocument>(apiBaseUrl, `/documents/${document.document_id}`);
+      const status = await apiFetch<StoredDocument>(apiBaseUrl, `/v1/documents/${document.document_id}`, {
+        token: tokens.access_token,
+      });
       setDocuments((current) => [status, ...current.filter((doc) => doc.document_id !== status.document_id)]);
       setSelectedDocumentId(status.document_id);
       setNotice(`${file.name} uploaded. Start processing when you are ready.`);
@@ -202,26 +381,32 @@ export function ChatApp() {
   }
 
   async function startProcessing(documentId: string) {
+    if (!tokens?.access_token) {
+      setError("Log in before processing documents.");
+      return;
+    }
+
     setError("");
     setNotice("Starting async processing...");
 
     try {
-      const response = await apiFetch<{
-        process_id: string;
-        document_id: string;
-        status: string;
-      }>(apiBaseUrl, `/documents/${documentId}/process`, {
-        method: "POST",
-        body: JSON.stringify({
-          user_id: userId,
-          embedding_model: embeddingModel,
-          chunking_strategy: "recursive",
-          chunk_size: 800,
-          chunk_overlap: 120,
-        }),
-      });
+      const response = await apiFetch<{ process_id: string; document_id: string; status: string }>(
+        apiBaseUrl,
+        `/v1/documents/${documentId}/process`,
+        {
+          method: "POST",
+          token: tokens.access_token,
+          body: JSON.stringify({
+            embedding_model: "text-embedding-3-small",
+            chunking_strategy: "recursive",
+            chunk_size: 800,
+            chunk_overlap: 120,
+          }),
+        },
+      );
 
       setProcessingId(response.process_id);
+      setSelectedDocumentId(documentId);
       setDocuments((current) =>
         current.map((doc) =>
           doc.document_id === documentId
@@ -235,55 +420,91 @@ export function ChatApp() {
     }
   }
 
+  async function ensureChat(query: string) {
+    if (activeChatId) return activeChatId;
+    if (!tokens?.access_token) throw new Error("Log in before chatting.");
+    const title = query.length > 42 ? `${query.slice(0, 42)}...` : query;
+    const chat = await apiFetch<ChatSummary>(apiBaseUrl, "/v1/chats", {
+      method: "POST",
+      token: tokens.access_token,
+      body: JSON.stringify({ title }),
+    });
+    setActiveChatId(chat.chat_id);
+    setChats((current) => [chat, ...current]);
+    return chat.chat_id;
+  }
+
+  async function newChat() {
+    if (!tokens?.access_token) {
+      setPanel("settings");
+      setError("Log in before creating a chat.");
+      return;
+    }
+    const chat = await apiFetch<ChatSummary>(apiBaseUrl, "/v1/chats", {
+      method: "POST",
+      token: tokens.access_token,
+      body: JSON.stringify({ title: "New Chat" }),
+    });
+    setActiveChatId(chat.chat_id);
+    setChats((current) => [chat, ...current]);
+    setMessages([{ id: crypto.randomUUID(), role: "assistant", content: "New chat started." }]);
+  }
+
   async function handleAsk(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const query = input.trim();
 
-    if (!query || asking) {
+    if (!query || asking || !tokens?.access_token) {
+      if (!tokens?.access_token) setError("Log in before asking questions.");
       return;
     }
 
     const documentIds = selectedDocument?.processing_status === "COMPLETED" ? [selectedDocument.document_id] : completedDocuments;
-    if (documentIds.length === 0) {
-      setError("Process at least one document before asking questions.");
-      return;
-    }
-
     setAsking(true);
     setError("");
     setInput("");
     setMessages((current) => [...current, { id: crypto.randomUUID(), role: "user", content: query }]);
 
     try {
+      const chatId = await ensureChat(query);
       const response = await apiFetch<{
-        answer: string;
-        citations: Citation[];
-        retrieved_chunks: number;
-      }>(apiBaseUrl, "/ask", {
+        chat_id: string;
+        message_id: string;
+        run_id: string;
+        status: string;
+      }>(apiBaseUrl, `/v1/chats/${chatId}/messages`, {
         method: "POST",
+        token: tokens.access_token,
         body: JSON.stringify({
-          user_id: userId,
-          query,
+          input: query,
           document_ids: documentIds,
-          top_k: 5,
-          llm_model: llmModel,
+          runtime_options: {
+            use_rag: documentIds.length > 0,
+            use_memory: true,
+            use_web: false,
+            allow_charts: true,
+            top_k: 5,
+            llm_model: llmModel,
+          },
         }),
       });
 
-      setMessages((current) => [
-        ...current,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: response.answer,
-          citations: response.citations,
-        },
-      ]);
+      setActiveRunId(response.run_id);
+      setPendingMessageId(response.message_id);
+      setNotice(`Runtime queued: ${response.run_id}`);
     } catch (err) {
-      setError(formatError(err));
-    } finally {
       setAsking(false);
+      setError(formatError(err));
     }
+  }
+
+  async function loadTrace(runId = activeRunId) {
+    if (!tokens?.access_token || !runId) return;
+    const response = await apiFetch<{ trace: Record<string, unknown> | null }>(apiBaseUrl, `/v1/runs/${runId}/trace`, {
+      token: tokens.access_token,
+    });
+    setTrace(response.trace);
+    setPanel("trace");
   }
 
   return (
@@ -293,18 +514,7 @@ export function ChatApp() {
           <button className="iconButton" aria-label="Toggle sidebar">
             <Menu size={18} />
           </button>
-          <button
-            className="newChat"
-            onClick={() =>
-              setMessages([
-                {
-                  id: crypto.randomUUID(),
-                  role: "assistant",
-                  content: "New chat started. I will answer from your completed documents.",
-                },
-              ])
-            }
-          >
+          <button className="newChat" onClick={newChat}>
             <MessageSquarePlus size={17} />
             New chat
           </button>
@@ -319,9 +529,9 @@ export function ChatApp() {
             <Settings size={18} />
             Settings
           </button>
-          <button className="navItem">
-            <Search size={18} />
-            Search
+          <button className={panel === "trace" ? "navItem active" : "navItem"} onClick={() => setPanel("trace")}>
+            <BarChart3 size={18} />
+            Trace
           </button>
         </div>
 
@@ -330,10 +540,15 @@ export function ChatApp() {
             <span>Chats</span>
             <History size={15} />
           </div>
-          {chatHistory.map((chat, index) => (
-            <button className={index === 0 ? "chatRow selected" : "chatRow"} key={chat.id}>
+          {chats.length === 0 && <p className="mutedText">No chats yet</p>}
+          {chats.map((chat) => (
+            <button
+              className={activeChatId === chat.chat_id ? "chatRow selected" : "chatRow"}
+              key={chat.chat_id}
+              onClick={() => setActiveChatId(chat.chat_id)}
+            >
               <span>{chat.title}</span>
-              <small>{chat.time}</small>
+              <small>{chat.message_count ?? 0}</small>
             </button>
           ))}
         </section>
@@ -346,7 +561,7 @@ export function ChatApp() {
             <h1>Document chat</h1>
           </div>
           <button className="modelSelect" onClick={() => setPanel("settings")}>
-            {llmModel}
+            {authenticated ? llmModel : "Sign in"}
             <ChevronDown size={16} />
           </button>
         </header>
@@ -363,8 +578,8 @@ export function ChatApp() {
             <article className={`message ${message.role}`} key={message.id}>
               <div className="avatar">{message.role === "assistant" ? <Bot size={18} /> : <User size={18} />}</div>
               <div className="bubble">
-                {message.content.split("\n").map((line) => (
-                  <p key={line || crypto.randomUUID()}>{line}</p>
+                {message.content.split("\n").map((line, index) => (
+                  <p key={`${message.id}-${index}`}>{line}</p>
                 ))}
                 {message.citations && message.citations.length > 0 && (
                   <div className="citations">
@@ -372,6 +587,15 @@ export function ChatApp() {
                       <span key={citation.chunk_id}>
                         [{index + 1}] {citation.file_name || citation.document_id} p.{citation.page_number ?? "?"}
                       </span>
+                    ))}
+                  </div>
+                )}
+                {message.artifacts && message.artifacts.length > 0 && (
+                  <div className="citations">
+                    {message.artifacts.map((artifact) => (
+                      <a key={artifact.artifact_id} href={artifact.presigned_url} target="_blank" rel="noreferrer">
+                        {artifact.artifact_type}
+                      </a>
                     ))}
                   </div>
                 )}
@@ -385,7 +609,7 @@ export function ChatApp() {
               </div>
               <div className="bubble mutedBubble">
                 <Loader2 size={16} className="spin" />
-                Thinking with retrieved chunks...
+                Runtime is working through memory, retrieval, and tools...
               </div>
             </article>
           )}
@@ -394,20 +618,29 @@ export function ChatApp() {
         <form className="composer" onSubmit={handleAsk}>
           <textarea
             aria-label="Message"
-            placeholder="Ask your processed documents anything..."
+            placeholder={authenticated ? "Ask your processed documents anything..." : "Log in from settings to start chatting..."}
             value={input}
             onChange={(event) => setInput(event.target.value)}
           />
           <div className="composerActions">
             <label className="iconButton" aria-label="Attach document">
               <Paperclip size={18} />
-              <input className="hiddenFile" type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={handleUpload} />
+              <input
+                className="hiddenFile"
+                type="file"
+                accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                onChange={handleUpload}
+              />
             </label>
             <button type="button" className="filterButton" onClick={() => setPanel("documents")}>
               <SlidersHorizontal size={16} />
               {selectedDocument ? selectedDocument.file_name : "All indexed docs"}
             </button>
-            <button type="submit" className="sendButton" aria-label="Send message" disabled={asking}>
+            <button type="button" className="filterButton" onClick={() => loadTrace()} disabled={!activeRunId}>
+              <BarChart3 size={16} />
+              Trace
+            </button>
+            <button type="submit" className="sendButton" aria-label="Send message" disabled={asking || !authenticated}>
               {asking ? <Loader2 size={18} className="spin" /> : <Send size={18} />}
             </button>
           </div>
@@ -417,35 +650,48 @@ export function ChatApp() {
       <aside className="workspace">
         <div className="workspaceHeader">
           <div>
-            <p className="eyebrow">{panel === "documents" ? "Library" : "Runtime"}</p>
-            <h2>{panel === "documents" ? "Document store" : "Settings"}</h2>
+            <p className="eyebrow">{panel === "documents" ? "Library" : panel === "settings" ? "Runtime" : "Observability"}</p>
+            <h2>{panel === "documents" ? "Document store" : panel === "settings" ? "Settings" : "Run trace"}</h2>
           </div>
           <button className="iconButton" aria-label="More options">
             <MoreHorizontal size={18} />
           </button>
         </div>
 
-        {panel === "documents" ? (
+        {panel === "documents" && (
           <DocumentStore
             documents={documents}
             selectedDocumentId={selectedDocument?.document_id}
             uploading={uploading}
+            authenticated={authenticated}
             onUpload={handleUpload}
             onSelect={setSelectedDocumentId}
             onProcess={startProcessing}
-          />
-        ) : (
-          <SettingsPanel
-            apiBaseUrl={apiBaseUrl}
-            userId={userId}
-            llmModel={llmModel}
-            embeddingModel={embeddingModel}
-            onApiBaseUrlChange={setApiBaseUrl}
-            onUserIdChange={setUserId}
-            onLlmModelChange={setLlmModel}
-            onEmbeddingModelChange={setEmbeddingModel}
+            onRefresh={refreshDocuments}
           />
         )}
+        {panel === "settings" && (
+          <SettingsPanel
+            apiBaseUrl={apiBaseUrl}
+            email={email}
+            password={password}
+            name={name}
+            confirmationCode={confirmationCode}
+            authenticated={authenticated}
+            llmModel={llmModel}
+            onApiBaseUrlChange={setApiBaseUrl}
+            onEmailChange={setEmail}
+            onPasswordChange={setPassword}
+            onNameChange={setName}
+            onConfirmationCodeChange={setConfirmationCode}
+            onLlmModelChange={setLlmModel}
+            onSignup={signup}
+            onConfirm={confirmSignup}
+            onLogin={login}
+            onLogout={logout}
+          />
+        )}
+        {panel === "trace" && <TracePanel trace={trace} activeRunId={activeRunId} onRefresh={() => loadTrace()} />}
       </aside>
     </main>
   );
@@ -455,25 +701,39 @@ function DocumentStore({
   documents,
   selectedDocumentId,
   uploading,
+  authenticated,
   onUpload,
   onSelect,
   onProcess,
+  onRefresh,
 }: {
   documents: StoredDocument[];
   selectedDocumentId?: string;
   uploading: boolean;
+  authenticated: boolean;
   onUpload: (event: ChangeEvent<HTMLInputElement>) => void;
   onSelect: (documentId: string) => void;
   onProcess: (documentId: string) => void;
+  onRefresh: () => void;
 }) {
   return (
     <div className="panelContent">
-      <label className={uploading ? "uploadZone disabled" : "uploadZone"}>
+      <label className={uploading || !authenticated ? "uploadZone disabled" : "uploadZone"}>
         {uploading ? <Loader2 size={24} className="spin" /> : <UploadCloud size={24} />}
-        <span>{uploading ? "Uploading..." : "Upload PDF or DOCX"}</span>
-        <small>Generates a pre-signed S3 upload, then stores metadata</small>
-        <input type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={onUpload} disabled={uploading} />
+        <span>{uploading ? "Uploading..." : authenticated ? "Upload PDF or DOCX" : "Sign in to upload"}</span>
+        <small>Uses /v1 presigned S3 upload and authenticated metadata</small>
+        <input
+          type="file"
+          accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          onChange={onUpload}
+          disabled={uploading || !authenticated}
+        />
       </label>
+
+      <button type="button" className="filterButton wideButton" onClick={onRefresh} disabled={!authenticated}>
+        <Search size={16} />
+        Refresh documents
+      </button>
 
       <div className="documentList">
         {documents.length === 0 && (
@@ -523,22 +783,40 @@ function DocumentStore({
 
 function SettingsPanel({
   apiBaseUrl,
-  userId,
+  email,
+  password,
+  name,
+  confirmationCode,
+  authenticated,
   llmModel,
-  embeddingModel,
   onApiBaseUrlChange,
-  onUserIdChange,
+  onEmailChange,
+  onPasswordChange,
+  onNameChange,
+  onConfirmationCodeChange,
   onLlmModelChange,
-  onEmbeddingModelChange,
+  onSignup,
+  onConfirm,
+  onLogin,
+  onLogout,
 }: {
   apiBaseUrl: string;
-  userId: string;
+  email: string;
+  password: string;
+  name: string;
+  confirmationCode: string;
+  authenticated: boolean;
   llmModel: string;
-  embeddingModel: string;
   onApiBaseUrlChange: (value: string) => void;
-  onUserIdChange: (value: string) => void;
+  onEmailChange: (value: string) => void;
+  onPasswordChange: (value: string) => void;
+  onNameChange: (value: string) => void;
+  onConfirmationCodeChange: (value: string) => void;
   onLlmModelChange: (value: string) => void;
-  onEmbeddingModelChange: (value: string) => void;
+  onSignup: () => void;
+  onConfirm: () => void;
+  onLogin: () => void;
+  onLogout: () => void;
 }) {
   return (
     <div className="panelContent">
@@ -547,9 +825,40 @@ function SettingsPanel({
         <input value={apiBaseUrl} onChange={(event) => onApiBaseUrlChange(event.target.value)} placeholder="https://api.example.com/dev" />
       </label>
       <label className="field">
-        <span>User ID</span>
-        <input value={userId} onChange={(event) => onUserIdChange(event.target.value)} placeholder="user_123" />
+        <span>Email</span>
+        <input value={email} onChange={(event) => onEmailChange(event.target.value)} placeholder="you@example.com" />
       </label>
+      <label className="field">
+        <span>Password</span>
+        <input value={password} onChange={(event) => onPasswordChange(event.target.value)} placeholder="Cognito password" type="password" />
+      </label>
+      <label className="field">
+        <span>Name</span>
+        <input value={name} onChange={(event) => onNameChange(event.target.value)} placeholder="Optional signup name" />
+      </label>
+      <div className="buttonRow">
+        <button type="button" className="filterButton" onClick={onSignup}>
+          <User size={16} />
+          Signup
+        </button>
+        <button type="button" className="filterButton" onClick={onLogin}>
+          <LogIn size={16} />
+          Login
+        </button>
+      </div>
+      <label className="field">
+        <span>Confirmation code</span>
+        <input value={confirmationCode} onChange={(event) => onConfirmationCodeChange(event.target.value)} placeholder="123456" />
+      </label>
+      <div className="buttonRow">
+        <button type="button" className="filterButton" onClick={onConfirm}>
+          <CheckCircle2 size={16} />
+          Confirm
+        </button>
+        <button type="button" className="filterButton" onClick={onLogout} disabled={!authenticated}>
+          Logout
+        </button>
+      </div>
       <label className="field">
         <span>OpenAI API key</span>
         <div className="inputWithIcon">
@@ -565,27 +874,60 @@ function SettingsPanel({
           <option>gpt-4o-mini</option>
         </select>
       </label>
-      <label className="field">
-        <span>Embedding model</span>
-        <select value={embeddingModel} onChange={(event) => onEmbeddingModelChange(event.target.value)}>
-          <option>text-embedding-3-small</option>
-          <option>text-embedding-3-large</option>
-        </select>
-      </label>
       <div className="settingNote">
         <CheckCircle2 size={17} />
-        API keys stay server-side in Lambda. This UI only sends document and chat requests to your deployed API Gateway.
+        {authenticated ? "Authenticated. The UI sends Bearer tokens to protected /v1 APIs." : "Log in to use protected /v1 document and chat APIs."}
       </div>
     </div>
   );
 }
 
-async function apiFetch<T>(apiBaseUrl: string, path: string, init?: RequestInit): Promise<T> {
+function TracePanel({ trace, activeRunId, onRefresh }: { trace: Record<string, unknown> | null; activeRunId: string; onRefresh: () => void }) {
+  const spans = Array.isArray(trace?.spans) ? (trace?.spans as Array<Record<string, unknown>>) : [];
+  return (
+    <div className="panelContent">
+      <button type="button" className="filterButton wideButton" onClick={onRefresh} disabled={!activeRunId}>
+        <BarChart3 size={16} />
+        Refresh trace
+      </button>
+      {!trace && (
+        <div className="emptyState">
+          <BarChart3 size={18} />
+          Send a chat message to create a run trace.
+        </div>
+      )}
+      {trace && (
+        <div className="traceBox">
+          <strong>{String(trace.trace_id || "trace")}</strong>
+          <span>Status: {String(trace.status || "unknown")}</span>
+          <span>Run: {String(trace.run_id || activeRunId)}</span>
+          <span>Spans: {spans.length}</span>
+          {spans.map((span) => (
+            <div className="traceSpan" key={String(span.span_id)}>
+              <b>{String(span.name)}</b>
+              <small>
+                {String(span.status)} · {String(span.latency_ms ?? 0)} ms
+              </small>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+async function apiFetch<T>(
+  apiBaseUrl: string,
+  path: string,
+  init?: RequestInit & { token?: string },
+): Promise<T> {
+  const { token, ...requestInit } = init || {};
   const response = await fetch(`${apiBaseUrl.replace(/\/$/, "")}${path}`, {
-    ...init,
+    ...requestInit,
     headers: {
       "Content-Type": "application/json",
-      ...(init?.headers || {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(requestInit.headers || {}),
     },
   });
 
@@ -593,10 +935,11 @@ async function apiFetch<T>(apiBaseUrl: string, path: string, init?: RequestInit)
   const body = text ? JSON.parse(text) : {};
 
   if (!response.ok) {
-    throw new Error(body.error || body.message || `Request failed with status ${response.status}`);
+    const message = body?.error?.message || body.error || body.message || `Request failed with status ${response.status}`;
+    throw new Error(message);
   }
 
-  return body as T;
+  return (body?.status === "success" && "data" in body ? body.data : body) as T;
 }
 
 function contentTypeForFile(fileName: string) {
@@ -608,10 +951,7 @@ function contentTypeForFile(fileName: string) {
 
 function regionalS3PostUrl(uploadUrl: string, apiBaseUrl: string) {
   const region = regionFromApiUrl(apiBaseUrl);
-  if (!region) {
-    return uploadUrl;
-  }
-
+  if (!region) return uploadUrl;
   return uploadUrl.replace(".s3.amazonaws.com", `.s3.${region}.amazonaws.com`);
 }
 
@@ -639,8 +979,6 @@ function statusClassName(status: string) {
 }
 
 function formatError(error: unknown) {
-  if (error instanceof Error) {
-    return error.message;
-  }
+  if (error instanceof Error) return error.message;
   return "Something went wrong.";
 }
