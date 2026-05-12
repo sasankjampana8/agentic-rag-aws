@@ -1,73 +1,301 @@
-# CloudRAG Agent — OpenAI + pgvector Serverless RAG Chatbot
+# CloudRAG Agent
 
-CloudRAG Agent is a single document-grounded chatbot product built on AWS serverless infrastructure. It uses OpenAI for embeddings and answer generation, PostgreSQL pgvector for vector search, and AWS API Gateway, Lambda, S3, DynamoDB, SQS, and RDS for the backend.
+CloudRAG Agent is a production-style, single chatbot application for document-grounded question answering. It uses AWS serverless services for upload, processing, metadata, queues, and APIs; OpenAI for embeddings and answer generation; and PostgreSQL with pgvector for vector search.
 
-The current working stage is the RAG backbone plus a Next.js chat UI, protected `/v1` document APIs, Cognito auth foundations, memory APIs, and an async chat runtime foundation with orchestration, improved retrieval, tools, run summaries, and trace storage.
+This repository is not a Bedrock project, not a no-code agent builder, and not an agent publishing platform. It is one configurable CloudRAG chatbot that can be deployed, tested, destroyed, and rebuilt while you iterate.
 
-CloudRAG is not a no-code agent builder, agent publishing platform, or user-defined tool marketplace. It is one configurable RAG chatbot that can be deployed, tested, destroyed, and rebuilt cleanly.
+## What This Project Does
 
-## Current Stage
+CloudRAG supports the end-to-end RAG flow:
 
-Current working capabilities:
+```text
+User login
+  -> document upload URL
+  -> direct upload to S3
+  -> document metadata in DynamoDB
+  -> async processing through SQS
+  -> PDF/DOCX text extraction
+  -> chunking
+  -> OpenAI embeddings
+  -> pgvector indexing
+  -> retrieval
+  -> chat runtime
+  -> OpenAI answer with citations
+  -> run trace stored in S3
+```
 
-- Generate S3 presigned POST data for PDF/DOCX upload.
-- Upload documents directly to S3.
-- Store document metadata in DynamoDB.
-- Queue async processing through SQS.
-- Extract text from PDF/DOCX.
-- Chunk extracted text.
-- Generate embeddings with OpenAI.
-- Store chunks and embeddings in PostgreSQL pgvector.
-- Retrieve relevant chunks by semantic search.
-- Generate grounded OpenAI answers with citations.
-- Deploy/destroy the AWS stack with CloudFormation and GitHub Actions.
-- Run a Next.js UI that can upload, process, and ask questions against documents.
+The current implementation includes:
 
-Current `/v1` production upgrade:
-
-- Cognito authentication.
-- Authenticated document APIs that derive `user_id` from JWT claims.
-- Chat, message, run, memory, and trace metadata.
+- Cognito authentication foundation.
+- Direct S3 uploads using presigned POST.
+- Async document processing with SQS and Lambda.
+- PDF and DOCX text extraction.
+- Chunking and OpenAI embedding generation.
+- PostgreSQL pgvector storage and retrieval.
+- Improved retrieval with candidate expansion, lexical reranking, metadata filters, diversity, and parent-neighbor context.
+- Chat, message, run, memory, and trace APIs.
 - Async runtime worker for chat messages.
 - Internal orchestration for direct, RAG, web, chart, and hybrid routes.
-- Improved retrieval with vector candidates, lexical reranking, metadata filters, document diversity, and parent-neighbor context.
 - Mock web/API tool and SVG chart artifact tool.
-- OpenTelemetry-style tracing with optional external export.
-- Compatibility wrapper for the current ask-style flow.
+- OpenTelemetry-style internal trace JSON saved to S3.
+- Next.js mock/product UI for upload, process, chat, settings, and traces.
+- CloudFormation and GitHub Actions for deploy/destroy.
 
-## Architecture Flow
+## What Is Not Included Yet
 
-Upload URL API -> direct S3 upload -> DynamoDB document metadata -> Start Processing API -> SQS -> worker Lambda -> text extraction -> chunking -> OpenAI embeddings -> PostgreSQL pgvector -> retrieval -> grounded answer with citations.
+The project intentionally avoids these for now:
 
-Current `/v1` chat flow foundation:
+- Bedrock.
+- Kubernetes, ECS, or full container orchestration.
+- Full SaaS multi-tenancy.
+- No-code agent-builder APIs.
+- Agent versioning or publishing platform APIs.
+- User-uploaded custom tools.
+- OCR.
+- Streaming responses.
+- Advanced production observability platform.
+- Production-grade private networking with NAT Gateway.
+- Full billing, tenant admin, and enterprise controls.
 
-Auth -> upload document -> process document -> create chat -> send message -> runtime queue -> runtime worker -> memory load -> retrieval -> optional tool context -> OpenAI answer -> assistant message -> run summary -> trace JSON in S3.
+## Tech Stack
 
-## Project Structure
+Backend:
+
+- Python 3.13
+- AWS Lambda
+- API Gateway HTTP API
+- S3
+- DynamoDB
+- SQS
+- RDS PostgreSQL
+- pgvector
+- Cognito
+- CloudWatch Logs
+- CloudFormation
+
+AI and retrieval:
+
+- OpenAI embeddings
+- OpenAI chat completions
+- PostgreSQL pgvector
+
+Frontend:
+
+- Next.js
+- React
+- TypeScript
+- lucide-react
+
+Deployment:
+
+- GitHub Actions
+- GitHub OIDC to AWS
+- CloudFormation
+- S3 Lambda artifact bucket
+
+## Repository Structure
 
 ```text
 agentic-rag-aws/
+├── .github/workflows/
+│   ├── deploy-cloudrag-mvp.yml
+│   └── destroy-cloudrag-mvp.yml
+├── docs/
+│   └── api_contract.md
 ├── frontend/
+│   ├── app/
+│   ├── components/
+│   └── package.json
+├── infra/cloudformation/
+│   ├── bootstrap-github-oidc.yaml
+│   └── cloudrag-mvp.yaml
 ├── lambdas/
-├── shared/
-├── scripts/
-├── sql/
+│   ├── auth_handler/
+│   ├── ask_handler/
+│   ├── chat_handler/
+│   ├── document_status_handler/
+│   ├── memory_handler/
+│   ├── process_status_handler/
+│   ├── processing_worker/
+│   ├── retrieval_handler/
+│   ├── run_handler/
+│   ├── runtime_worker/
+│   ├── start_process_handler/
+│   ├── upload_url_handler/
+│   └── v1_documents_handler/
 ├── postman/
+├── scripts/
+├── shared/
+├── sql/
 ├── tests/
-├── local_data/
-└── local_outputs/
+├── requirements.txt
+└── requirements-lambda.txt
 ```
 
-## Environment
+## Architecture
 
-Copy `.env.example` to `.env` for local work and fill in:
+### Document Processing Flow
 
-- `OPENAI_API_KEY`
-- `PG_HOST`, `PG_PORT`, `PG_DATABASE`, `PG_USER`, `PG_PASSWORD`
-- AWS names such as `RAW_BUCKET`, `USER_TABLE`, `DOCUMENT_TABLE`, `PROCESS_JOB_TABLE`, and `PROCESS_QUEUE_URL`
-- Cognito values such as `COGNITO_USER_POOL_ID` and `COGNITO_CLIENT_ID`
+```text
+POST /v1/documents/upload-url
+  -> Lambda creates document metadata in DynamoDB
+  -> Lambda returns presigned S3 POST data
+  -> Client uploads PDF/DOCX directly to S3
+  -> POST /v1/documents/{document_id}/process
+  -> Lambda creates process job and sends SQS message
+  -> processing_worker Lambda downloads file
+  -> text extraction
+  -> chunking
+  -> OpenAI embeddings
+  -> pgvector insert
+  -> process/document status updated
+```
 
-Install dependencies:
+### Chat Runtime Flow
+
+```text
+POST /v1/chats
+  -> create chat metadata
+POST /v1/chats/{chat_id}/messages
+  -> store user message
+  -> create run
+  -> enqueue runtime job
+runtime_worker
+  -> load chat and memory
+  -> route with orchestrator
+  -> retrieve chunks if RAG is needed
+  -> optionally add mock web/tool context
+  -> call OpenAI through model gateway
+  -> store assistant response
+  -> update run summary
+  -> save trace JSON to S3
+GET /v1/chats/{chat_id}/messages/{message_id}/response
+  -> poll final response
+```
+
+## API Overview
+
+The detailed contract lives in [docs/api_contract.md](docs/api_contract.md).
+
+### Auth
+
+```text
+POST /v1/auth/signup
+POST /v1/auth/confirm
+POST /v1/auth/login
+POST /v1/auth/refresh
+POST /v1/auth/logout
+```
+
+All protected `/v1` APIs require:
+
+```text
+Authorization: Bearer <access_token>
+```
+
+After Cognito login, the backend derives `user_id` from JWT claims. New protected APIs should not trust a `user_id` sent in the request body.
+
+### Documents
+
+```text
+POST   /v1/documents/upload-url
+GET    /v1/documents
+GET    /v1/documents/{document_id}
+POST   /v1/documents/{document_id}/process
+GET    /v1/documents/{document_id}/processes/{process_id}
+DELETE /v1/documents/{document_id}
+```
+
+### Retrieval
+
+```text
+POST /v1/retrieval/query
+```
+
+### Chats And Messages
+
+```text
+POST /v1/chats
+GET  /v1/chats
+GET  /v1/chats/{chat_id}
+GET  /v1/chats/{chat_id}/messages
+POST /v1/chats/{chat_id}/messages
+GET  /v1/chats/{chat_id}/messages/{message_id}/response
+```
+
+### Memory
+
+```text
+GET  /v1/chats/{chat_id}/memory
+POST /v1/chats/{chat_id}/memory/summarize
+```
+
+### Runs And Observability
+
+```text
+GET /v1/runs
+GET /v1/runs/{run_id}
+GET /v1/runs/{run_id}/trace
+GET /v1/observability/summary
+GET /v1/observability/errors
+```
+
+### Compatibility Routes
+
+The earlier MVP routes still exist for compatibility:
+
+```text
+POST /documents/upload-url
+GET  /documents/{document_id}
+POST /documents/{document_id}/process
+GET  /process/{process_id}/status
+POST /retrieval/query
+POST /ask
+```
+
+The product direction is the `/v1` chat flow:
+
+```text
+create chat -> send message -> poll response -> inspect run trace
+```
+
+## Global Response Format
+
+Newer `/v1` handlers use a consistent envelope:
+
+```json
+{
+  "request_id": "req_xxx",
+  "status": "success",
+  "data": {},
+  "metadata": {
+    "timestamp": "2026-05-12T00:00:00Z",
+    "api_version": "v1"
+  }
+}
+```
+
+Errors follow:
+
+```json
+{
+  "request_id": "req_xxx",
+  "status": "error",
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Invalid request payload.",
+    "details": {}
+  },
+  "metadata": {
+    "timestamp": "2026-05-12T00:00:00Z",
+    "api_version": "v1"
+  }
+}
+```
+
+## Local Development
+
+Create a Python environment:
 
 ```bash
 python3.13 -m venv .venv
@@ -75,37 +303,69 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Local-First Development
+Create local folders:
 
-Run SQL setup against local PostgreSQL or RDS with the project helper:
+```bash
+mkdir -p local_data/raw local_data/processed local_outputs
+```
+
+Create `.env` from `.env.example` if present, or define these values:
+
+```text
+AWS_REGION=ap-south-1
+RAW_BUCKET=<bucket-name>
+DOCUMENT_TABLE=cloudrag_documents
+PROCESS_JOB_TABLE=cloudrag_process_jobs
+PROCESS_QUEUE_URL=<sqs-url>
+
+OPENAI_API_KEY=<your-openai-key>
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+OPENAI_LLM_MODEL=gpt-4.1-mini
+
+PG_HOST=<postgres-host>
+PG_PORT=5432
+PG_DATABASE=cloudragdb
+PG_USER=postgres
+PG_PASSWORD=<db-password>
+
+CHUNK_SIZE=800
+CHUNK_OVERLAP=120
+EMBEDDING_BATCH_SIZE=50
+DEFAULT_TOP_K=5
+```
+
+### Setup pgvector Schema
 
 ```bash
 python scripts/setup_pgvector_schema.py
 ```
 
-Or with `psql`:
+This runs:
 
-```bash
-psql "$DATABASE_URL" -f sql/create_pgvector_extension.sql
-psql "$DATABASE_URL" -f sql/create_document_chunks_table.sql
-psql "$DATABASE_URL" -f sql/create_indexes.sql
+```text
+sql/create_pgvector_extension.sql
+sql/create_document_chunks_table.sql
+sql/create_indexes.sql
 ```
 
-Check DB connectivity:
+### Test Database Connection
 
 ```bash
 python scripts/test_db_connection.py
 ```
 
-Process one file locally:
+### Process A Local Document
 
 ```bash
-python scripts/local_process_document.py local_data/raw/sample.pdf \
+python scripts/local_process_document.py \
+  local_data/raw/sample.pdf \
   --user-id user_123 \
-  --document-id doc_local_001
+  --document-id doc_local_001 \
+  --file-name sample.pdf \
+  --file-extension pdf
 ```
 
-Test retrieval:
+### Test Retrieval Locally
 
 ```bash
 python scripts/local_retrieval_test.py \
@@ -115,7 +375,7 @@ python scripts/local_retrieval_test.py \
   --top-k 5
 ```
 
-Test final answer generation:
+### Test Ask Locally
 
 ```bash
 python scripts/local_ask_test.py \
@@ -124,9 +384,9 @@ python scripts/local_ask_test.py \
   --document-ids doc_local_001
 ```
 
-## Chat UI
+## Frontend
 
-The Next.js frontend lives in `frontend/`.
+The frontend lives in `frontend/`.
 
 ```bash
 cd frontend
@@ -134,92 +394,89 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`.
+Open:
 
-The UI currently includes:
+```text
+http://localhost:3000
+```
 
-- Chat workspace.
-- Document store panel.
-- Settings panel.
-- File upload through the backend presigned upload API.
-- Start-processing action.
+The UI supports:
+
+- Cognito signup/login/confirm flow.
+- API base URL configuration.
+- Document upload.
+- Start processing.
 - Process status polling.
-- Ask flow through the current answer API.
-- Citation chips.
+- Chat creation.
+- Message sending and response polling.
+- Citations and trace panel.
 
-## AWS Resources Required
+Set the default API URL with:
 
-Use region `ap-south-1` and prefix `cloudrag-mvp`.
+```text
+NEXT_PUBLIC_CLOUDRAG_API_BASE_URL=https://<api-id>.execute-api.ap-south-1.amazonaws.com/dev
+```
 
-- S3 bucket: `cloudrag-mvp-documents-<account-id>-ap-south-1`
-- DynamoDB table: `cloudrag_documents`, partition key `document_id`
-- DynamoDB table: `cloudrag_process_jobs`, partition key `process_id`
-- SQS queue: `cloudrag-processing-queue`
-- SQS DLQ: `cloudrag-processing-dlq`
-- RDS PostgreSQL with pgvector
-- API Gateway HTTP API: `cloudrag-mvp-api`
-- Lambda functions for upload URL, document status, start process, process status, worker, retrieval, and ask
+If the variable is not set, paste the API URL in the Settings panel.
 
-## CloudFormation + GitHub Actions
+## CloudFormation Deployment
 
-This repo includes CloudFormation and GitHub Actions for repeatable MVP deployments.
+CloudFormation files:
 
-Files:
+```text
+infra/cloudformation/bootstrap-github-oidc.yaml
+infra/cloudformation/cloudrag-mvp.yaml
+```
 
-- `infra/cloudformation/bootstrap-github-oidc.yaml`
-- `infra/cloudformation/cloudrag-mvp.yaml`
-- `.github/workflows/deploy-cloudrag-mvp.yml`
-- `.github/workflows/destroy-cloudrag-mvp.yml`
-- `scripts/package_lambdas.sh`
+GitHub Actions workflows:
 
-The main stack creates the stage-1 RAG backbone:
+```text
+.github/workflows/deploy-cloudrag-mvp.yml
+.github/workflows/destroy-cloudrag-mvp.yml
+```
 
-- S3 raw document bucket
-- Cognito User Pool and app client for `/v1/auth/*`
-- DynamoDB users table
-- DynamoDB document metadata table
-- DynamoDB process jobs table
-- SQS processing queue and DLQ
-- RDS PostgreSQL database
-- VPC/subnets/security group for the public MVP database
-- IAM roles for Lambda
-- Lambda functions
-- SQS event source mapping for the worker
-- HTTP API Gateway routes
+### What The Main Stack Creates
 
-It also deploys the code paths for:
+The `cloudrag-mvp.yaml` stack creates:
 
-- Cognito signup, confirmation, login, refresh, and logout
-- Presigned upload URL generation
-- Document metadata/status
-- SQS async processing
-- PDF/DOCX text extraction
-- Chunking
-- OpenAI embeddings
-- pgvector insertion
-- Retrieval
-- LLM answer generation with citations
+- S3 raw document bucket.
+- Cognito User Pool.
+- Cognito User Pool Client.
+- API Gateway HTTP API.
+- JWT authorizer.
+- DynamoDB users table.
+- DynamoDB documents table.
+- DynamoDB process jobs table.
+- DynamoDB chats table.
+- DynamoDB messages table.
+- DynamoDB runs table.
+- DynamoDB memory table.
+- SQS processing queue and DLQ.
+- SQS runtime queue and DLQ.
+- RDS PostgreSQL database.
+- VPC, subnets, route table, internet gateway, and DB security group.
+- Lambda execution roles.
+- Lambda functions.
+- SQS event source mappings.
+- API Gateway routes and integrations.
 
-### MVP Networking Note
+### Networking Note
 
-For the lowest-cost MVP, Lambdas are not placed inside a VPC. That lets them call OpenAI without a NAT Gateway. To let those public Lambdas and the GitHub runner connect to RDS, the workflow accepts `db_ingress_cidr`.
+For the low-cost MVP, Lambdas are not placed inside a VPC. That avoids needing a NAT Gateway for outbound OpenAI calls.
 
-For quick experiments, use:
+To allow Lambdas and GitHub Actions to reach RDS, the stack currently creates a publicly accessible RDS instance and accepts a `DbIngressCidr` parameter. For quick experiments, the workflow default can use:
 
 ```text
 0.0.0.0/0
 ```
 
-This is convenient but not production-safe. Delete the stack when done. For production, move RDS private and use Lambda in VPC with NAT Gateway, ECS/Fargate, or another controlled egress design.
+This is convenient for development but not production-safe. For production, move RDS private and use a VPC/NAT/ECS/Fargate design with tighter security groups.
+
+## GitHub Actions Setup
 
 ### One-Time Bootstrap
 
-Deploy the bootstrap stack once from your local machine or AWS CloudShell. It creates:
-
-- GitHub OIDC deploy role
-- S3 artifact bucket for Lambda ZIP files
-
-Example:
+Run the bootstrap stack once:
 
 ```bash
 aws cloudformation deploy \
@@ -234,13 +491,13 @@ aws cloudformation deploy \
     CreateGitHubOidcProvider=true
 ```
 
-If your AWS account already has the GitHub OIDC provider, set:
+If your AWS account already has a GitHub OIDC provider, use:
 
 ```text
 CreateGitHubOidcProvider=false
 ```
 
-Then get outputs:
+Read bootstrap outputs:
 
 ```bash
 aws cloudformation describe-stacks \
@@ -249,9 +506,9 @@ aws cloudformation describe-stacks \
   --query "Stacks[0].Outputs"
 ```
 
-### GitHub Secrets And Variables
+### GitHub Secrets
 
-Repository secrets:
+Set these repository secrets:
 
 ```text
 AWS_GITHUB_DEPLOY_ROLE_ARN
@@ -259,20 +516,25 @@ OPENAI_API_KEY
 DB_PASSWORD
 ```
 
-Repository variables:
+`AWS_GITHUB_DEPLOY_ROLE_ARN` comes from the bootstrap stack output.
+
+Do not store AWS access keys in GitHub if you are using OIDC. GitHub OIDC gives the workflow short-lived AWS credentials.
+
+### GitHub Variables
+
+Set this repository variable:
 
 ```text
 CFN_ARTIFACT_BUCKET
 ```
 
-Do not store AWS access keys if using OIDC. The official `aws-actions/configure-aws-credentials` action recommends OIDC so GitHub receives short-lived AWS credentials instead of long-lived keys.
+Example:
 
-Sources:
+```text
+cloudrag-mvp-artifacts-285870986996-ap-south-1
+```
 
-- GitHub OIDC for AWS: https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services
-- AWS credentials action: https://github.com/marketplace/actions/configure-aws-credentials-action-for-github-actions
-
-### Deploy
+## Deploy
 
 In GitHub:
 
@@ -280,28 +542,32 @@ In GitHub:
 Actions -> Deploy CloudRAG MVP -> Run workflow
 ```
 
-Recommended inputs for experiments:
+Recommended experiment inputs:
 
 ```text
 stack_name: cloudrag-mvp
 region: ap-south-1
 project_name: cloudrag
 environment_name: mvp
-raw_bucket_name: leave blank, or provide a globally unique bucket name
+raw_bucket_name: leave blank
 db_ingress_cidr: 0.0.0.0/0
 db_instance_class: db.t3.micro
 ```
 
-The workflow:
+The deploy workflow:
 
-1. Runs backend tests.
-2. Packages Lambda ZIPs.
-3. Uploads ZIPs to the artifact bucket.
-4. Deploys CloudFormation.
-5. Runs pgvector SQL setup against RDS.
-6. Prints stack outputs.
+1. Checks out the repo.
+2. Assumes the AWS deploy role using GitHub OIDC.
+3. Installs Python.
+4. Runs backend tests.
+5. Packages Lambda ZIPs.
+6. Uploads Lambda artifacts to S3.
+7. Deletes unrecoverable `ROLLBACK_COMPLETE` stack state if needed.
+8. Deploys CloudFormation.
+9. Runs pgvector SQL setup.
+10. Prints stack outputs.
 
-### Destroy
+## Destroy
 
 In GitHub:
 
@@ -309,174 +575,300 @@ In GitHub:
 Actions -> Destroy CloudRAG MVP -> Run workflow
 ```
 
-This empties the stack-created raw bucket, deletes the stack, and waits for deletion. Use it after experiments to avoid RDS costs.
+The destroy workflow:
 
-The artifact bucket from the bootstrap stack is intentionally not deleted by the app stack.
+1. Assumes the AWS deploy role.
+2. Reads the raw document bucket from stack outputs.
+3. Empties the raw bucket.
+4. Deletes the CloudFormation stack.
+5. Waits for stack deletion.
 
-## IAM Summary
+The bootstrap artifact bucket is intentionally not deleted by the app destroy workflow. It is shared deployment infrastructure.
 
-Use one Lambda execution role per function. Every role needs CloudWatch Logs permissions. Keep service permissions narrow:
-
-- Upload URL: `dynamodb:PutItem` on documents table and `s3:PutObject` on `raw/*`.
-- Document Status: `dynamodb:GetItem`, `dynamodb:UpdateItem`, and `s3:GetObject` on `raw/*`.
-- Start Process: document read/update, process job put, `s3:GetObject`, and `sqs:SendMessage`.
-- Process Status: `dynamodb:GetItem` on process jobs.
-- Worker: consume SQS, read raw S3 objects, write processed S3 JSON, update DynamoDB document/job records, and VPC access if RDS is private.
-- Retrieval and Ask: CloudWatch Logs, VPC access if RDS is private, and optional Secrets Manager read permissions.
-
-Do not use administrator or full-access managed policies for the MVP.
-
-## API Routes
-
-Current Stage 1 routes:
-
-- `POST /documents/upload-url`
-- `GET /documents/{document_id}`
-- `POST /documents/{document_id}/process`
-- `GET /process/{process_id}/status`
-- `POST /retrieval/query`
-- `POST /ask`
-
-The Ask API reuses shared retrieval logic directly. It does not call the Retrieval API over HTTP.
-
-Current `/v1` auth routes:
-
-- `POST /v1/auth/signup`
-- `POST /v1/auth/confirm`
-- `POST /v1/auth/login`
-- `POST /v1/auth/refresh`
-- `POST /v1/auth/logout`
-
-Current protected `/v1` document routes:
-
-- `POST /v1/documents/upload-url`
-- `GET /v1/documents`
-- `GET /v1/documents/{document_id}`
-- `POST /v1/documents/{document_id}/process`
-- `GET /v1/documents/{document_id}/processes/{process_id}`
-- `DELETE /v1/documents/{document_id}`
-
-Current protected `/v1` memory routes:
-
-- `GET /v1/chats/{chat_id}/memory`
-- `POST /v1/chats/{chat_id}/memory/summarize`
-
-Current protected `/v1` chat/runtime routes:
-
-- `POST /v1/chats`
-- `GET /v1/chats`
-- `GET /v1/chats/{chat_id}`
-- `GET /v1/chats/{chat_id}/messages`
-- `POST /v1/chats/{chat_id}/messages`
-- `GET /v1/chats/{chat_id}/messages/{message_id}/response`
-
-Current protected `/v1` run and observability routes:
-
-- `GET /v1/runs`
-- `GET /v1/runs/{run_id}`
-- `GET /v1/runs/{run_id}/trace`
-- `GET /v1/observability/summary`
-- `GET /v1/observability/errors`
-
-`/v1` routes are documented in [docs/api_contract.md](docs/api_contract.md). The primary product API now moves from direct `/ask` calls to:
+If destroy fails on Cognito, make sure the bootstrap role includes Cognito user-pool/client lifecycle permissions, especially:
 
 ```text
-create chat -> send message -> poll response -> inspect run trace
+cognito-idp:DeleteUserPoolClient
+cognito-idp:DeleteUserPool
 ```
 
-`/v1/ask` will remain as a compatibility wrapper over the new chat/message runtime flow.
+## Lambda Packaging
 
-## Manual Lambda Deployment Notes
+Use:
 
-Package each Lambda with the `shared/` directory and installed dependencies. The simple metadata handlers can usually use ZIP packages. The processing worker may be easier as a Lambda container image because `PyMuPDF` and `psycopg` include native dependencies.
+```bash
+scripts/package_lambdas.sh
+```
 
-Set `PROCESS_QUEUE_URL` for the start process handler. Set `OPENAI_API_KEY` and PostgreSQL variables for worker, retrieval, and ask.
+When packaging from macOS for AWS Lambda, native dependencies must be Linux-compatible. Use:
 
-If RDS is private, configure worker, retrieval, and ask Lambdas inside the VPC and attach `AWSLambdaVPCAccessExecutionRole`.
+```bash
+LAMBDA_PIP_PLATFORM=manylinux2014_x86_64 \
+LAMBDA_PIP_PYTHON_VERSION=3.13 \
+scripts/package_lambdas.sh
+```
 
-## Postman Test Flow
+This prevents errors like:
 
-Import `postman/cloudrag_mvp_collection.json`.
+```text
+Runtime.ImportModuleError: No module named 'pydantic_core._pydantic_core'
+```
 
-1. Generate upload URL with `POST /documents/upload-url`.
-2. Upload the actual file directly to S3 using the returned presigned POST `url` and every returned `fields` value as form-data fields. Add the file as the final form-data file part.
-3. Check `GET /documents/{document_id}`.
-4. Start async processing with `POST /documents/{document_id}/process`.
-5. Poll `GET /process/{process_id}/status`.
-6. Query chunks with `POST /retrieval/query`.
-7. Generate grounded answer with `POST /ask`.
+For heavier production packaging, use Lambda container images or build ZIPs inside the official AWS Lambda Python container.
+
+## Manual Smoke Test Flow
+
+After deploy, use the stack outputs:
+
+```bash
+aws cloudformation describe-stacks \
+  --stack-name cloudrag-mvp \
+  --region ap-south-1 \
+  --query "Stacks[0].Outputs" \
+  --output table
+```
+
+Then test:
+
+1. Sign up with `/v1/auth/signup`.
+2. Confirm with `/v1/auth/confirm`.
+3. Login with `/v1/auth/login`.
+4. Use `access_token` as `Authorization: Bearer <token>`.
+5. Request upload URL with `/v1/documents/upload-url`.
+6. Upload file directly to S3 using returned POST fields.
+7. Start processing with `/v1/documents/{document_id}/process`.
+8. Poll `/v1/documents/{document_id}/processes/{process_id}`.
+9. Create chat with `/v1/chats`.
+10. Send message with `/v1/chats/{chat_id}/messages`.
+11. Poll `/v1/chats/{chat_id}/messages/{message_id}/response`.
+12. Inspect trace with `/v1/runs/{run_id}/trace`.
+
+## Postman
+
+Import:
+
+```text
+postman/cloudrag_mvp_collection.json
+```
+
+Core MVP flow:
+
+1. Generate upload URL.
+2. Upload file directly to S3 with form-data.
+3. Check document status.
+4. Start processing.
+5. Poll processing status.
+6. Query retrieval.
+7. Ask a grounded question.
+
+For `/v1` APIs, add:
+
+```text
+Authorization: Bearer <access_token>
+```
+
+## IAM Notes
+
+Use least privilege where possible. Do not use `AdministratorAccess` for normal deployment.
+
+Important permission groups:
+
+- S3: raw uploads, processed outputs, traces, artifacts.
+- DynamoDB: documents, process jobs, users, chats, messages, runs, memory.
+- SQS: processing queue and runtime queue.
+- Lambda: create/update/delete functions and event source mappings.
+- API Gateway: routes, integrations, stages, authorizers.
+- Cognito: user pool and user pool client lifecycle.
+- RDS/EC2: PostgreSQL, networking, security groups.
+- IAM: role creation and pass role for Lambda execution roles.
+
+The bootstrap GitHub deploy role needs enough permission for CloudFormation to create and destroy all stack resources.
 
 ## Troubleshooting
 
-Upload URL works but S3 upload fails:
+### Upload URL works but S3 upload fails
 
-- Missing returned form fields in Postman.
+Possible causes:
+
+- Missing returned form fields.
 - `Content-Type` does not exactly match the presigned policy.
-- File size exceeds policy.
-- Bucket name mismatch.
+- File size exceeds the upload policy.
+- Wrong bucket or key.
 
-Document status does not update to `UPLOADED`:
+### Document status does not become `UPLOADED`
 
-- File was not uploaded to expected S3 key.
+Possible causes:
+
+- File was uploaded to the wrong S3 key.
 - Lambda lacks `s3:GetObject`.
-- `document_id` is wrong.
+- Wrong `document_id`.
 
-Processing job stays `QUEUED`:
+### Processing job stays `QUEUED`
 
-- SQS trigger is not attached to the worker.
-- Worker Lambda permission issue.
+Possible causes:
+
+- SQS event source mapping is missing.
+- Worker Lambda is failing.
+- Worker lacks SQS permissions.
 - SQS message was not sent.
-- Worker errors are visible in CloudWatch.
 
-Worker fails while importing `PyMuPDF` or `psycopg`:
+Check CloudWatch logs for:
 
-- Lambda package is missing native dependencies.
-- Use a Lambda container image or Lambda layer.
+```text
+/aws/lambda/cloudrag-processing-worker
+```
 
-Worker cannot connect to RDS:
+### Lambda import fails
 
-- Lambda is not in the VPC.
-- RDS security group does not allow the Lambda security group.
-- Wrong DB endpoint or credentials.
-- Subnet or route table issue.
+Example:
 
-Retrieval returns no chunks:
+```text
+Runtime.ImportModuleError: No module named 'pydantic_core._pydantic_core'
+```
 
-- Document was not processed successfully.
-- pgvector table is empty.
+This usually means the ZIP was built on macOS with macOS native wheels. Rebuild with:
+
+```bash
+LAMBDA_PIP_PLATFORM=manylinux2014_x86_64 \
+LAMBDA_PIP_PYTHON_VERSION=3.13 \
+scripts/package_lambdas.sh
+```
+
+### Worker cannot connect to RDS
+
+Possible causes:
+
+- RDS security group does not allow the source.
+- Wrong DB password.
+- RDS is still creating or modifying.
+- DB endpoint changed after redeploy.
+- RDS was deleted by destroy workflow.
+
+### Retrieval returns no chunks
+
+Possible causes:
+
+- Document processing did not complete.
+- pgvector schema was not created.
+- `document_chunks` table is empty.
 - `user_id` mismatch.
 - `document_ids` filter is wrong.
-- Similarity threshold is too high.
+- Retrieval threshold is too high.
 
-Ask API returns insufficient context:
+### Chat response stays `QUEUED` or `RUNNING`
 
-- Retrieval returned no chunks.
-- Uploaded document content does not contain the answer.
-- Prompt context is empty.
+Possible causes:
+
+- Runtime queue event source mapping is missing.
+- Runtime worker Lambda is failing.
+- OpenAI API key is missing or invalid.
+- RDS connection failed during retrieval.
+
+Check CloudWatch logs for:
+
+```text
+/aws/lambda/cloudrag-runtime-worker
+```
+
+### Destroy workflow fails
+
+Possible causes:
+
+- Raw bucket was not emptied.
+- GitHub deploy role lacks delete permissions for a resource.
+- Cognito user pool/client lifecycle permissions are missing.
+- CloudFormation stack is stuck in `DELETE_FAILED`.
+
+Check events:
+
+```bash
+aws cloudformation describe-stack-events \
+  --stack-name cloudrag-mvp \
+  --region ap-south-1 \
+  --query "StackEvents[0:20].[Timestamp,LogicalResourceId,ResourceStatus,ResourceStatusReason]" \
+  --output table
+```
 
 ## Tests
+
+Run backend tests:
 
 ```bash
 pytest
 ```
 
-Current tests cover validation, chunking, prompt building, and DOCX extraction.
+Run frontend build:
 
-## Future Upgrades
+```bash
+cd frontend
+npm run build
+```
 
-- Stage 2: `/v1` API contract, Pydantic schemas, global response format, and request context.
-- Stage 3: Cognito auth and JWT-based `user_id` extraction.
-- Stage 4: chat, message, run, memory, and trace metadata APIs.
-- Stage 5: async runtime worker for chat messages.
-- Stage 6: better retrieval with metadata filters, hybrid search, reranking, and chunk previews.
-- Stage 7: optional web/API tool and chart artifact tool.
-- Stage 8: observability with trace IDs, spans, prompt metadata, latency, token usage, cost estimate, and optional Langfuse/OTLP export.
-- Stage 9: production networking, private RDS, stronger IAM, and deployment hardening.
+## Cost Notes
+
+The main cost-bearing resource is RDS PostgreSQL. Delete the app stack when you are done experimenting:
+
+```text
+Actions -> Destroy CloudRAG MVP -> Run workflow
+```
+
+The bootstrap artifact bucket can remain, but it may accumulate Lambda ZIP artifacts. Clean old prefixes occasionally if needed.
+
+## Current Production Gaps
+
+Before treating this as production, improve:
+
+- Private RDS networking.
+- Secrets Manager for OpenAI and DB credentials.
+- Better Lambda packaging through container builds.
+- Stronger IAM scoping.
+- Real web search provider instead of mock tool.
+- More robust chart generation.
+- Streaming chat responses.
+- Better retry/idempotency strategy.
+- Automated evaluation and retrieval quality tests.
+- External tracing integration such as Langfuse or OTLP.
+- CI checks for frontend and backend together.
+
+## Roadmap
+
+Near-term:
+
+- Harden `/v1/ask` as a compatibility wrapper over chat runtime.
+- Improve Postman collection for the `/v1` auth and chat flow.
+- Add frontend environment examples.
+- Add trace viewer polish in the UI.
+- Add cleaner deployment outputs for frontend configuration.
+
+Later:
+
+- Hybrid retrieval.
+- Strong reranking.
+- Query rewriting.
+- Semantic and dynamic chunking.
+- Multi-layer caching.
+- Tenant isolation.
+- Streaming.
+- Production observability.
+- Private networking.
+- CI/CD hardening.
 
 ## Portfolio Positioning
 
-CloudRAG Agent: Serverless document RAG backend on AWS with direct S3 uploads, async processing, pgvector retrieval, and citation-grounded LLM answers.
+Project name:
+
+```text
+CloudRAG Agent
+```
+
+Short description:
+
+```text
+Serverless document RAG chatbot on AWS with direct S3 uploads, async processing, pgvector retrieval, Cognito auth, chat runtime, and citation-grounded OpenAI answers.
+```
 
 Resume bullet:
 
-Built a serverless RAG backend on AWS using API Gateway, Lambda, S3, DynamoDB, SQS, PostgreSQL pgvector, and OpenAI, supporting direct document uploads, async chunking and embedding, semantic retrieval, and grounded answer generation with citations.
+```text
+Built a serverless RAG chatbot on AWS using API Gateway, Lambda, S3, DynamoDB, SQS, Cognito, RDS PostgreSQL pgvector, and OpenAI, supporting direct document uploads, async chunking and embedding, semantic retrieval, chat memory, run traces, and grounded answer generation with citations.
+```
